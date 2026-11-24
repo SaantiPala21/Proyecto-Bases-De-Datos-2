@@ -5,7 +5,7 @@
 | **Motor** | SQL Server 2019 / 2022 (mínimo 2017) |
 | **Herramienta** | SQL Server Management Studio (SSMS) |
 
-Base de datos distribuida (simulada) en SQL Server para una entidad financiera con sedes en **Medellín (sede central)**, **Bogotá**, **Cartagena**, **San Andrés** y **Cali**. Incluye Linked Server, procedimientos CRUD con `TRY...CATCH`, triggers, vistas, funciones definidas por el usuario y 14 consultas de análisis.
+Base de datos distribuida (simulada) en SQL Server para una entidad financiera con sucursales en **Medellín**, **Bogotá**, **Cartagena**, **San Andrés** y **Cali**, y una **sede central en Medellín** que gestiona todas las sedes. Hay **una base principal** (`BancoCentral`) y **una base remota por sucursal** (5 nodos), conectadas con **un Linked Server por nodo**. Incluye procedimientos CRUD con `TRY...CATCH`, triggers, vistas, funciones definidas por el usuario y 14 consultas de análisis.
 
 ---
 
@@ -41,14 +41,16 @@ ProyectoFinal_BD2/
 │   ├── 01_Guia_Construccion_Bases_de_Datos.docx
 │   └── 02_Documento_Tecnico_Funcionamiento.docx
 └── scripts/
-    ├── 00_Ejecutar_Todo.sql        ejecuta 01 a 08 en orden (modo SQLCMD)
-    ├── 01_BD_Remota.sql            BancoRemoto: tablas, triggers, CRUD remoto, datos de catálogo
-    ├── 02_BD_Principal.sql         BancoCentral: tablas, restricciones, índices, sinónimos
-    ├── 03_Linked_Server.sql        Linked Server SRV_REMOTO + pruebas
-    ├── 04_Funciones.sql            2 funciones escalares + 4 de tabla
-    ├── 05_Triggers.sql             13 triggers de BancoCentral
-    ├── 06_Procedimientos.sql       20 CRUD + consulta 5 + 5 procedimientos distribuidos
-    ├── 07_Vistas.sql               6 vistas (2 distribuidas)
+    ├── 00_Ejecutar_Todo.sql            ejecuta 01 a 08 en orden (modo SQLCMD)
+    ├── 01_BD_Remotas_Sucursales.sql    5 nodos (BancoMedellin, BancoBogota, BancoCartagena,
+    │                                   BancoSanAndres, BancoCali): tablas, triggers, CRUD, datos
+    ├── 02_BD_Principal.sql             BancoCentral: tablas, índices, directorio de nodos,
+    │                                   sinónimos y vistas de reconstrucción
+    ├── 03_Linked_Server.sql            6 Linked Servers (SRV_CENTRAL + uno por sucursal) + pruebas
+    ├── 04_Funciones.sql                2 funciones escalares + 4 de tabla
+    ├── 05_Triggers.sql                 13 triggers de BancoCentral
+    ├── 06_Procedimientos.sql           20 CRUD + consulta 5 + 7 procedimientos distribuidos
+    ├── 07_Vistas.sql                   6 vistas de negocio + 5 vistas globales de los nodos
     ├── 08_Datos_Principal.sql      datos de prueba
     ├── 09_Consultas.sql            las 14 consultas
     └── 10_Pruebas_Evidencias.sql   pruebas de CRUD, validaciones, triggers y auditoría
@@ -59,21 +61,36 @@ ProyectoFinal_BD2/
 ## 2. Arquitectura
 
 ```
-            INSTANCIA SQL SERVER (simula 2 servidores)
- ┌─────────────────────────────────┐        ┌────────────────────────────────────┐
- │  BancoCentral  (SEDE PRINCIPAL  │        │  BancoRemoto  (SERVIDOR REMOTO)    │
- │  MEDELLÍN)                      │        │                                    │
- │   • Clientes                    │ Linked │   • TiposCuenta                    │
- │   • Cuentas ────────────────────┼Server─►│   • Sucursales (Medellín, Bogotá,  │
- │   • Transacciones               │SRV_    │     Cartagena, San Andrés, Cali)   │
- │   • Prestamos ──────────────────┼REMOTO─►│   • Empleados                      │
- │   • Pagos                       │        │   • ProductosFinancieros           │
- │   • Funciones, vistas, SP,      │◄───────┼── • Auditoria (historial)          │
- │     triggers                    │sinónim.│   • SP CRUD remotos, triggers      │
- └─────────────────────────────────┘        └────────────────────────────────────┘
+                   INSTANCIA SQL SERVER (simula 6 servidores)
+
+                ┌──────────────────────────────────────────┐
+                │  BancoCentral  (BASE PRINCIPAL – SEDE    │  SRV_CENTRAL
+                │  CENTRAL MEDELLÍN, gestiona todas sedes) │
+                │  Clientes · Cuentas · Transacciones ·    │
+                │  Préstamos · Pagos · Nodos (directorio)  │
+                │  funciones, vistas, SP, triggers         │
+                └───────────────────┬──────────────────────┘
+                                    │ Linked Servers (4 partes, OPENQUERY, RPC)
+    ┌───────────────┬───────────────┼───────────────┬───────────────┐
+    ▼               ▼               ▼               ▼               ▼
+ BancoMedellin   BancoBogota    BancoCartagena  BancoSanAndres   BancoCali
+ SRV_MEDELLIN    SRV_BOGOTA     SRV_CARTAGENA   SRV_SANANDRES    SRV_CALI
+ ─────────────   ─────────────  ─────────────   ─────────────    ─────────────
+ Cada nodo:  TiposCuenta (replicado) · Sucursales (de su ciudad) · Empleados (de su ciudad)
+             ProductosFinancieros (replicado) · Auditoria (historial local) · CRUD y triggers
+    ◄────────────── los nodos también se consultan entre sí (malla) ──────────────►
 ```
 
-La sede central accede a la base remota como si fuera otro servidor mediante el Linked Server `SRV_REMOTO`: nombres de 4 partes (`SRV_REMOTO.BancoRemoto.dbo.Tabla`), `OPENQUERY` y llamadas RPC a procedimientos remotos.
+| Nodo | Base de datos | Linked Server | Sucursal principal (id) |
+|---|---|---|---|
+| Principal | `BancoCentral` | `SRV_CENTRAL` | — |
+| 1 | `BancoMedellin` | `SRV_MEDELLIN` | Sede Central Medellín (1) |
+| 2 | `BancoBogota` | `SRV_BOGOTA` | Sucursal Bogotá (2) |
+| 3 | `BancoCartagena` | `SRV_CARTAGENA` | Sucursal Cartagena (3) |
+| 4 | `BancoSanAndres` | `SRV_SANANDRES` | Sucursal San Andrés (4) |
+| 5 | `BancoCali` | `SRV_CALI` | Sucursal Cali (5) |
+
+La sede central accede a cada sucursal como si fuera otro servidor: nombres de 4 partes (`SRV_BOGOTA.BancoBogota.dbo.Empleados`), `OPENQUERY` y llamadas RPC. Como los Linked Servers se definen a nivel de instancia, **cada nodo puede consultar a cualquier otro** (p. ej. desde `BancoCali`: `SELECT * FROM SRV_BOGOTA.BancoBogota.dbo.Empleados`).
 
 ---
 
@@ -112,21 +129,22 @@ EXEC sp_configure 'nested triggers';                     -- run_value debe ser 1
 
 O bien abrir `Script_Completo_ProyectoFinal.sql` y ejecutarlo completo.
 
-### Paso 1 – Base de datos remota (`01_BD_Remota.sql`)
+### Paso 1 – Bases de datos remotas de las sucursales (`01_BD_Remotas_Sucursales.sql`)
 
-Qué hace:
-1. Elimina y crea `BancoRemoto`.
-2. Crea `TiposCuenta`, `Sucursales`, `Empleados`, `ProductosFinancieros` y `Auditoria` con PK, UNIQUE, CHECK y la FK Empleados → Sucursales.
-3. Crea un índice único filtrado que garantiza **una sola sede central**.
-4. Crea los sinónimos `syn_CuentasCentral` y `syn_PrestamosCentral` hacia BancoCentral (se permiten aunque el destino aún no exista).
-5. Crea 8 triggers (auditoría y control) y 13 procedimientos (CRUD de tipos de cuenta, sucursales y empleados + consulta de productos).
-6. Inserta 4 tipos de cuenta, 5 sedes, 12 empleados y 7 productos.
+Qué hace (una sección por nodo, repetida para las 5 ciudades):
+1. Elimina la versión anterior del proyecto (`BancoRemoto` y `SRV_REMOTO`) si existe.
+2. Elimina y crea la base del nodo (`BancoMedellin`, `BancoBogota`, `BancoCartagena`, `BancoSanAndres`, `BancoCali`).
+3. Crea `TiposCuenta`, `Sucursales`, `Empleados`, `ProductosFinancieros` y `Auditoria` con PK, UNIQUE, CHECK y la FK Empleados → Sucursales.
+4. `Sucursales` solo acepta la ciudad del nodo (`CHECK (ciudad = 'Bogotá')`, etc.). En Medellín un índice único filtrado garantiza **una sola sede central**; en los demás nodos `CHECK (es_sede_central = 0)`.
+5. Ids globalmente únicos: la sucursal principal conserva el id 1–5; las nuevas reciben `IDENTITY(N01,1)` (Bogotá 201, 202…), y los empleados `IDENTITY(N001,1)` (Bogotá 2001…).
+6. Crea los sinónimos `syn_CuentasCentral` y `syn_PrestamosCentral` hacia BancoCentral.
+7. Crea 8 triggers y 13 procedimientos por nodo.
+8. Inserta en cada nodo los 4 tipos de cuenta y 7 productos (replicados con los mismos ids), su sucursal y sus empleados.
 
 ```sql
-USE BancoRemoto;
-SELECT * FROM dbo.Sucursales;        -- 5 filas, Medellín con es_sede_central = 1
-SELECT COUNT(*) FROM dbo.Empleados;  -- 12
-SELECT COUNT(*) FROM dbo.Auditoria;  -- > 0: los triggers auditaron los INSERT
+SELECT * FROM BancoBogota.dbo.Sucursales;          -- 1 fila: Sucursal Bogotá (id 2)
+SELECT COUNT(*) FROM BancoMedellin.dbo.Empleados;  -- 4 (los otros nodos tienen 2)
+SELECT COUNT(*) FROM BancoCali.dbo.TiposCuenta;    -- 4 (igual en los 5 nodos)
 ```
 
 ### Paso 2 – Base de datos principal (`02_BD_Principal.sql`)
@@ -138,32 +156,37 @@ Qué hace:
    - `CK_Transacciones_destino`: la transferencia exige cuenta destino distinta al origen; depósitos y retiros no la tienen.
    - CHECK de dominios: tipo de cliente, estados, montos > 0, plazo 1–360 meses, interés 0–100 %.
 3. Crea índices de apoyo.
-4. Crea los sinónimos `syn_TiposCuenta`, `syn_Sucursales`, `syn_Empleados`, `syn_ProductosFinancieros` y `syn_Auditoria`.
+4. Crea `dbo.Nodos`, el directorio que indica en qué base y Linked Server vive cada ciudad.
+5. Crea sinónimos: `syn_TiposCuenta`, `syn_ProductosFinancieros` y `syn_Auditoria` (hacia `BancoMedellin`, la copia maestra) y `syn_Sucursales_XXX` / `syn_Empleados_XXX` para cada nodo.
+6. Crea las vistas `vw_Sucursales` y `vw_Empleados`, que reconstruyen las tablas globales con `UNION ALL` de los 5 fragmentos (las usan los triggers).
 
 ```sql
 USE BancoCentral;
-SELECT name FROM sys.tables;                         -- 5 tablas
-SELECT name, base_object_name FROM sys.synonyms;     -- 5 sinónimos
+SELECT name FROM sys.tables;                         -- 6 tablas (5 + Nodos)
+SELECT name, base_object_name FROM sys.synonyms;     -- 13 sinónimos
+SELECT * FROM dbo.vw_Sucursales;                     -- 5 sucursales, una por nodo
 ```
 
-### Paso 3 – Linked Server (`03_Linked_Server.sql`)
+### Paso 3 – Linked Servers (`03_Linked_Server.sql`)
 
-Qué hace:
-1. Elimina `SRV_REMOTO` si ya existe.
+Qué hace, para cada uno de los 6 nodos (`SRV_CENTRAL`, `SRV_MEDELLIN`, `SRV_BOGOTA`, `SRV_CARTAGENA`, `SRV_SANANDRES`, `SRV_CALI`):
+1. Lo elimina si ya existe.
 2. Detecta el proveedor instalado (`MSOLEDBSQL19`, `MSOLEDBSQL` o `SQLNCLI11`).
-3. Crea el Linked Server apuntando a la propia instancia (`SERVERPROPERTY('ServerName')`), catálogo `BancoRemoto`, con `TrustServerCertificate=yes`.
+3. Lo crea apuntando a la propia instancia (`SERVERPROPERTY('ServerName')`) con el catálogo del nodo y `TrustServerCertificate=yes`.
 4. Login con `@useself = 'True'` (mismas credenciales del usuario conectado).
 5. Activa `data access`, `rpc`, `rpc out` y desactiva `remote proc transaction promotion` (no requiere MSDTC).
-6. Prueba: `sp_testlinkedserver`, consulta de 4 partes, `OPENQUERY` y RPC.
+6. Lo prueba con `sp_testlinkedserver`.
 
-Verificación: aparecen las sucursales y tipos de cuenta, y el mensaje *"Conexión con SRV_REMOTO verificada"*. En el Explorador de objetos: **Objetos de servidor → Servidores vinculados → SRV_REMOTO**.
+Después muestra las 5 sucursales unidas por 4 partes, un `OPENQUERY`, un RPC y una consulta **entre sucursales** (desde `BancoCali` hacia `SRV_BOGOTA`).
+
+Verificación: seis mensajes *"Linked Server SRV_… verificado"*. En el Explorador de objetos: **Objetos de servidor → Servidores vinculados**.
 
 <details>
 <summary>Alternativa gráfica</summary>
 
-Clic derecho en **Servidores vinculados → Nuevo servidor vinculado**:
-- Nombre: `SRV_REMOTO` · Otro origen de datos · Proveedor: *Microsoft OLE DB Driver for SQL Server*
-- Origen de datos: nombre de la instancia (ej. `MIEQUIPO\SQLEXPRESS`) · Catálogo: `BancoRemoto`
+Clic derecho en **Servidores vinculados → Nuevo servidor vinculado** (repetir para cada nodo):
+- Nombre: `SRV_BOGOTA` · Otro origen de datos · Proveedor: *Microsoft OLE DB Driver for SQL Server*
+- Origen de datos: nombre de la instancia (ej. `MIEQUIPO\SQLEXPRESS`) · Catálogo: `BancoBogota`
 - Cadena de proveedor: `TrustServerCertificate=yes;`
 - Seguridad: *Se establecerán usando el contexto de seguridad actual del inicio de sesión*
 - Opciones de servidor: Acceso a datos = True, RPC = True, Salida RPC = True
@@ -177,7 +200,7 @@ SELECT name, type_desc FROM BancoCentral.sys.objects WHERE type IN ('FN','IF','T
 
 ### Paso 5 – Triggers (`05_Triggers.sql`)
 
-Crea 13 triggers en BancoCentral (los 8 de BancoRemoto ya existen): **21 en total**, al menos uno por cada una de las 10 tablas.
+Crea 13 triggers en BancoCentral (cada nodo de sucursal ya tiene sus 8): **13 + 8 × 5 = 53 en total**, al menos uno por cada tabla de cada base.
 
 ```sql
 SELECT OBJECT_NAME(parent_id) AS tabla, name,
@@ -188,13 +211,14 @@ FROM BancoCentral.sys.triggers ORDER BY tabla;
 ### Paso 6 – Procedimientos (`06_Procedimientos.sql`)
 
 ```sql
-SELECT name FROM BancoCentral.sys.procedures ORDER BY name;   -- 26 procedimientos
+SELECT name FROM BancoCentral.sys.procedures ORDER BY name;   -- 28 procedimientos
 ```
 
 ### Paso 7 – Vistas (`07_Vistas.sql`)
 
 ```sql
 SELECT * FROM BancoCentral.dbo.vw_Distribuida_CuentasSucursalTipo;   -- no debe dar error
+SELECT * FROM BancoCentral.dbo.vw_Dist_Sucursales;                  -- 5 filas, una por nodo
 ```
 
 ### Paso 8 – Datos de prueba (`08_Datos_Principal.sql`)
@@ -230,21 +254,23 @@ Ejecutar parte por parte. Las pruebas **[ERROR ESPERADO]** deben fallar: el `CAT
 | *The certificate chain was issued by an authority that is not trusted* | MSOLEDBSQL 19 exige cifrado. Agregar `TrustServerCertificate=yes` en la cadena de proveedor (el script ya lo hace). |
 | *Cannot initialize the data source object of OLE DB provider* | Instalar *Microsoft OLE DB Driver for SQL Server* y reejecutar el script 03. |
 | *Login failed for user 'NT AUTHORITY\ANONYMOUS LOGON'* | Solo con otro equipo (doble salto). Usar un login SQL: `sp_addlinkedsrvlogin` con `@useself='False', @rmtuser, @rmtpassword`. |
-| *Server 'SRV_REMOTO' is not configured for DATA ACCESS / RPC* | Reejecutar las líneas `sp_serveroption` del script 03. |
+| *Server 'SRV_BOGOTA' is not configured for DATA ACCESS / RPC* | Reejecutar el script 03. |
 | *MSDTC on server is unavailable* | Se escribió a través del Linked Server dentro de una transacción. El diseño lo evita usando sinónimos en los triggers. |
+| *CREATE INDEX failed because … 'QUOTED_IDENTIFIER'* | Solo con `sqlcmd` desde consola: agregar el parámetro `-I`. En SSMS no ocurre. |
 
 ---
 
 ## 6. Supuestos
 
 1. El enunciado menciona "hoteles"; se interpreta como error de redacción y se modelan **sucursales** de la entidad financiera.
-2. Distribución simulada: ambas bases en la misma instancia; Linked Server *loopback*.
-3. Préstamos con **interés simple anual**: `total = monto × (1 + interés/100 × plazo/12)`; cuota de referencia = `total / plazo`.
-4. Los pagos se aplican al saldo total; para ingresos por intereses cada pago se reparte proporcionalmente entre capital e interés.
-5. Máximo **3 préstamos vigentes** (ACTIVO o MORA) por cliente.
-6. Las transacciones son **inmutables**: no se editan; se anulan (se eliminan y se revierte su efecto) y se registra una nueva.
-7. Clientes y cuentas con historial no se borran físicamente: se inactivan / cierran.
-8. Valores en pesos colombianos, `DECIMAL(18,2)`.
+2. Distribución simulada: las 6 bases en la misma instancia; Linked Servers *loopback*.
+3. Los catálogos (tipos de cuenta y productos) son comunes a todo el banco: se **replican** en los 5 nodos y la copia de Medellín es la maestra.
+4. Préstamos con **interés simple anual**: `total = monto × (1 + interés/100 × plazo/12)`; cuota de referencia = `total / plazo`.
+5. Los pagos se aplican al saldo total; para ingresos por intereses cada pago se reparte proporcionalmente entre capital e interés.
+6. Máximo **3 préstamos vigentes** (ACTIVO o MORA) por cliente.
+7. Las transacciones son **inmutables**: no se editan; se anulan (se eliminan y se revierte su efecto) y se registra una nueva.
+8. Clientes y cuentas con historial no se borran físicamente: se inactivan / cierran.
+9. Valores en pesos colombianos, `DECIMAL(18,2)`.
 
 ---
 
